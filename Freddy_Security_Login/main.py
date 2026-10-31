@@ -19,7 +19,7 @@ CINZA = "#858b98"
 VERDE = "#24cf54"
 BORDA = "#282b35"
 
-CAMERA_ID = 0
+CAMERA_ID = 1
 PORTA_ARDUINO = "COM3"
 BAUD_RATE = 9600
 LIMIAR_MOVIMENTO = 1500
@@ -562,6 +562,8 @@ class FreddySecurity:
         self.tema_claro = self.carregar_tema()
         self.janelas_auxiliares = []
         self.movimento_ativo = False
+        self.inicio_movimento_candidato = None
+        self.ultimo_movimento_detectado = 0.0
         self.arquivos_gravacoes = []
         self.janela.title('FREDDY SECURITY SYSTEM')
         self.janela.geometry('1250x760')
@@ -761,11 +763,24 @@ class FreddySecurity:
         else:
             self.movimento_camera = False
             self.frame_anterior = None
-        movimento_detectado = self.sensor_arduino or self.movimento_camera
-        if movimento_detectado and not self.movimento_ativo:
+        sinal_movimento = self.sensor_arduino or self.movimento_camera
+        agora = time.monotonic()
+        estado_anterior = self.movimento_ativo
+
+        if sinal_movimento:
+            if self.inicio_movimento_candidato is None:
+                self.inicio_movimento_candidato = agora
+            self.ultimo_movimento_detectado = agora
+            if agora - self.inicio_movimento_candidato >= 0.35:
+                self.movimento_ativo = True
+        else:
+            self.inicio_movimento_candidato = None
+            if self.movimento_ativo and agora - self.ultimo_movimento_detectado >= 0.5:
+                self.movimento_ativo = False
+
+        if self.movimento_ativo and not estado_anterior:
             self.registrar_movimento()
-        self.movimento_ativo = movimento_detectado
-        self.enviar_comando_arduino(movimento_detectado)
+        self.enviar_comando_arduino(self.movimento_ativo)
         self.janela.after(30, self.atualizar_imagem)
 
     def atualizar_horario(self):
