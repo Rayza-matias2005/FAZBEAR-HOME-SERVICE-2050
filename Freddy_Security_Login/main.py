@@ -9,6 +9,7 @@ import time
 import sqlite3
 import hashlib
 import secrets
+import json
 
 FUNDO = "#050609"
 PAINEL = "#0c0e13"
@@ -23,7 +24,10 @@ PORTA_ARDUINO = "COM3"
 BAUD_RATE = 9600
 LIMIAR_MOVIMENTO = 1500
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "freddy.db")
+PASTA_PROJETO = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(PASTA_PROJETO, "freddy.db")
+ARQUIVO_TEMA = os.path.join(PASTA_PROJETO, "freddy_config.json")
+ARQUIVO_MOVIMENTOS = os.path.join(PASTA_PROJETO, "movimentos.log")
 
 def conectar_banco():
     conexao = sqlite3.connect(DB_PATH)
@@ -555,6 +559,10 @@ class FreddySecurity:
 
     def __init__(self, janela):
         self.janela = janela
+        self.tema_claro = self.carregar_tema()
+        self.janelas_auxiliares = []
+        self.movimento_ativo = False
+        self.arquivos_gravacoes = []
         self.janela.title('FREDDY SECURITY SYSTEM')
         self.janela.geometry('1250x760')
         self.janela.minsize(900, 600)
@@ -572,6 +580,8 @@ class FreddySecurity:
         self.estado_enviado = None
         self.frame_anterior = None
         self.criar_interface()
+        if self.tema_claro:
+            self.aplicar_tema(self.janela)
         self.conectar_arduino()
         self.conectar_camera()
         self.janela.protocol('WM_DELETE_WINDOW', self.fechar)
@@ -752,6 +762,9 @@ class FreddySecurity:
             self.movimento_camera = False
             self.frame_anterior = None
         movimento_detectado = self.sensor_arduino or self.movimento_camera
+        if movimento_detectado and not self.movimento_ativo:
+            self.registrar_movimento()
+        self.movimento_ativo = movimento_detectado
         self.enviar_comando_arduino(movimento_detectado)
         self.janela.after(30, self.atualizar_imagem)
 
@@ -763,7 +776,7 @@ class FreddySecurity:
         if self.frame is None:
             messagebox.showinfo('Freddy Security', 'Aguardando a webcam para capturar uma foto.')
             return
-        nome = os.path.join(os.path.dirname(os.path.abspath(__file__)), datetime.now().strftime('freddy_%Y%m%d_%H%M%S.jpg'))
+        nome = os.path.join(PASTA_PROJETO, datetime.now().strftime('freddy_%Y%m%d_%H%M%S.jpg'))
         if cv2.imwrite(nome, self.frame):
             self.rodape.config(text=f'FOTO SALVA: {nome}')
         else:
@@ -776,7 +789,7 @@ class FreddySecurity:
             messagebox.showinfo('Freddy Security', 'Conecte a webcam antes de iniciar a gravação.')
             return
         altura, largura = self.frame.shape[:2]
-        self.nome_video = os.path.join(os.path.dirname(os.path.abspath(__file__)), datetime.now().strftime('freddy_%Y%m%d_%H%M%S.avi'))
+        self.nome_video = os.path.join(PASTA_PROJETO, datetime.now().strftime('freddy_%Y%m%d_%H%M%S.avi'))
         codec = cv2.VideoWriter_fourcc(*'MJPG')
         self.video = cv2.VideoWriter(self.nome_video, codec, 20.0, (largura, altura))
         if not self.video.isOpened():
@@ -806,14 +819,195 @@ class FreddySecurity:
         else:
             self.rodape.config(text='MONITORAMENTO EM TEMPO REAL')
 
+    def carregar_tema(self):
+        try:
+            with open(ARQUIVO_TEMA, "r", encoding="utf-8") as arquivo:
+                return json.load(arquivo).get("tema") == "claro"
+        except (OSError, ValueError, AttributeError):
+            return False
+
+    def salvar_tema(self):
+        try:
+            with open(ARQUIVO_TEMA, "w", encoding="utf-8") as arquivo:
+                json.dump({"tema": "claro" if self.tema_claro else "escuro"}, arquivo)
+        except OSError as erro:
+            print(f"N\u00e3o foi poss\u00edvel salvar o tema: {erro}")
+
+    def registrar_movimento(self):
+        origens = []
+        if self.movimento_camera:
+            origens.append("c\u00e2mera")
+        if self.sensor_arduino:
+            origens.append("sensor")
+        horario = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+        try:
+            with open(ARQUIVO_MOVIMENTOS, "a", encoding="utf-8") as arquivo:
+                arquivo.write(f"{horario} - Movimento detectado ({' + '.join(origens)})\n")
+            self.rodape.config(text=f"MOVIMENTO DETECTADO | {horario}")
+        except OSError as erro:
+            print(f"N\u00e3o foi poss\u00edvel registrar o movimento: {erro}")
+
+    def atualizar_lista_gravacoes(self):
+        self.lista_gravacoes.delete(0, tk.END)
+        extensoes = (".jpg", ".jpeg", ".png", ".avi", ".mp4", ".mov")
+        arquivos = []
+        try:
+            for nome in os.listdir(PASTA_PROJETO):
+                caminho = os.path.join(PASTA_PROJETO, nome)
+                if nome.lower().startswith("freddy_") and nome.lower().endswith(extensoes) and os.path.isfile(caminho):
+                    arquivos.append(caminho)
+        except OSError as erro:
+            messagebox.showerror("Grava\u00e7\u00f5es", f"N\u00e3o foi poss\u00edvel listar os arquivos: {erro}", parent=self.janela_gravacoes)
+            return
+        self.arquivos_gravacoes = sorted(arquivos, key=os.path.getmtime, reverse=True)
+        for caminho in self.arquivos_gravacoes:
+            self.lista_gravacoes.insert(tk.END, os.path.basename(caminho))
+        if not self.arquivos_gravacoes:
+            self.lista_gravacoes.insert(tk.END, "Nenhuma foto ou grava\u00e7\u00e3o encontrada.")
+
+    def abrir_gravacao_selecionada(self, evento=None):
+        selecao = self.lista_gravacoes.curselection()
+        if not selecao or selecao[0] >= len(self.arquivos_gravacoes):
+            return
+        caminho = self.arquivos_gravacoes[selecao[0]]
+        try:
+            os.startfile(caminho)
+        except (OSError, AttributeError) as erro:
+            messagebox.showerror("Grava\u00e7\u00f5es", f"N\u00e3o foi poss\u00edvel abrir o arquivo: {erro}", parent=self.janela_gravacoes)
+
+    def abrir_pasta_gravacoes(self):
+        try:
+            os.startfile(PASTA_PROJETO)
+        except (OSError, AttributeError) as erro:
+            messagebox.showerror("Grava\u00e7\u00f5es", f"N\u00e3o foi poss\u00edvel abrir a pasta: {erro}", parent=self.janela_gravacoes)
+
+    def movimentos(self):
+        try:
+            with open(ARQUIVO_MOVIMENTOS, "r", encoding="utf-8") as arquivo:
+                linhas = arquivo.readlines()
+        except FileNotFoundError:
+            linhas = []
+        except OSError as erro:
+            messagebox.showerror("Movimentos", f"N\u00e3o foi poss\u00edvel ler o registro: {erro}", parent=self.janela_gravacoes)
+            return
+        if not linhas:
+            texto = "Ainda n\u00e3o h\u00e1 movimentos registrados."
+        else:
+            texto = "\n".join(linha.rstrip() for linha in linhas[-20:])
+        messagebox.showinfo("Movimentos recentes", texto, parent=self.janela_gravacoes)
+
     def gravacoes(self):
-        messagebox.showinfo('Gravações', 'As gravações ficam na pasta de execução do projeto.')
+        if hasattr(self, "janela_gravacoes") and self.janela_gravacoes.winfo_exists():
+            self.janela_gravacoes.lift()
+            self.atualizar_lista_gravacoes()
+            return
+        self.janela_gravacoes = tk.Toplevel(self.janela)
+        self.janelas_auxiliares.append(self.janela_gravacoes)
+        self.janela_gravacoes.title("Grava\u00e7\u00f5es e fotos")
+        self.janela_gravacoes.geometry("520x410")
+        self.janela_gravacoes.minsize(420, 300)
+        fundo = "#ffffff" if self.tema_claro else FUNDO
+        painel = "#f0f2f5" if self.tema_claro else PAINEL
+        texto = "#20242c" if self.tema_claro else BRANCO
+        self.janela_gravacoes.configure(bg=fundo)
+        tk.Label(self.janela_gravacoes, text="FOTOS E GRAVA\u00c7\u00d5ES", font=("Consolas", 14, "bold"),
+                 fg=VERMELHO, bg=fundo).pack(pady=(16, 10))
+        area = tk.Frame(self.janela_gravacoes, bg=fundo)
+        area.pack(fill="both", expand=True, padx=16, pady=(0, 10))
+        rolagem = tk.Scrollbar(area)
+        rolagem.pack(side="right", fill="y")
+        self.lista_gravacoes = tk.Listbox(area, font=("Consolas", 10), bg=painel, fg=texto,
+                                          selectbackground=VERMELHO, selectforeground=BRANCO,
+                                          yscrollcommand=rolagem.set, relief="flat", activestyle="none")
+        self.lista_gravacoes.pack(side="left", fill="both", expand=True)
+        rolagem.config(command=self.lista_gravacoes.yview)
+        self.lista_gravacoes.bind("<Double-Button-1>", self.abrir_gravacao_selecionada)
+        botoes = tk.Frame(self.janela_gravacoes, bg=fundo)
+        botoes.pack(fill="x", padx=16, pady=(0, 16))
+        for rotulo, comando in (("Abrir", self.abrir_gravacao_selecionada),
+                                ("Atualizar", self.atualizar_lista_gravacoes),
+                                ("Movimentos", self.movimentos),
+                                ("Abrir pasta", self.abrir_pasta_gravacoes)):
+            tk.Button(botoes, text=rotulo, command=comando, font=("Segoe UI", 9),
+                      fg=texto, bg=painel, activebackground=VERMELHO,
+                      activeforeground=BRANCO, relief="flat", cursor="hand2",
+                      padx=8, pady=7).pack(side="left", expand=True, padx=3)
+        self.atualizar_lista_gravacoes()
+
+    def aplicar_tema(self, widget):
+        escuro_para_claro = {
+            "#050609": "#f4f5f7", "#0a0c12": "#f0f2f5",
+            "#07090e": "#ffffff", "#090c12": "#ffffff",
+            "#0c0e13": "#f0f2f5", "#0c111a": "#f5f6f8",
+            "#151820": "#f5f6f8", "#151a24": "#e8ebf0",
+            "#20232b": "#e2e5ea", "#210810": "#f9e8eb",
+            "#242a35": "#d6dae1", "#282b35": "#d6dae1",
+            "#39475b": "#c5cbd5", "#4a0b15": "#f4dfe3",
+            "#000000": "#e9ebef", "#030407": "#e9ebef",
+            "#eeeeee": "#20242c", "#cbd2df": "#343b48",
+            "#9aa8bd": "#566174", "#858b98": "#626b78",
+            "#8292aa": "#536176", "#65758d": "#5c687a",
+            "#a9001b": "#8f0018", "#d90024": "#c90022",
+        }
+        claro_para_escuro = {claro: escuro for escuro, claro in escuro_para_claro.items()}
+        mapa = escuro_para_claro if self.tema_claro else claro_para_escuro
+        for opcao in ("bg", "fg", "highlightbackground", "activebackground",
+                      "activeforeground", "insertbackground", "highlightcolor"):
+            try:
+                atual = widget.cget(opcao)
+                novo = mapa.get(str(atual).lower())
+                if novo:
+                    widget.configure(**{opcao: novo})
+            except (tk.TclError, TypeError):
+                pass
+        for filho in widget.winfo_children():
+            self.aplicar_tema(filho)
+
+    def alternar_tema(self):
+        self.tema_claro = not self.tema_claro
+        self.salvar_tema()
+        self.aplicar_tema(self.janela)
+        for auxiliar in self.janelas_auxiliares:
+            try:
+                if auxiliar.winfo_exists():
+                    self.aplicar_tema(auxiliar)
+            except tk.TclError:
+                pass
+        if hasattr(self, "janela_config") and self.janela_config.winfo_exists():
+            self.aplicar_tema(self.janela_config)
+        if hasattr(self, "botao_tema"):
+            texto = "Ativar tema escuro" if self.tema_claro else "Ativar tema claro"
+            self.botao_tema.config(text=texto)
 
     def configuracoes(self):
-        messagebox.showinfo('Configurações', f'Índice da webcam: {CAMERA_ID}\nPorta do Arduino: {PORTA_ARDUINO}')
+        if hasattr(self, "janela_config") and self.janela_config.winfo_exists():
+            self.janela_config.lift()
+            return
+
+        self.janela_config = tk.Toplevel(self.janela)
+        self.janela_config.title("Configura\u00e7\u00f5es")
+        self.janela_config.geometry("390x260")
+        self.janela_config.resizable(False, False)
+        self.janela_config.transient(self.janela)
+        fundo = "#ffffff" if self.tema_claro else FUNDO
+        painel = "#f0f2f5" if self.tema_claro else PAINEL
+        texto = "#20242c" if self.tema_claro else BRANCO
+        secundario = "#536176" if self.tema_claro else CINZA
+        self.janela_config.configure(bg=fundo)
+
+        tk.Label(self.janela_config, text="CONFIGURA\u00c7\u00d5ES", font=("Consolas", 16, "bold"),
+                 fg=VERMELHO, bg=fundo).pack(pady=(22, 14))
+        tk.Label(self.janela_config, text="Apar\u00eancia", font=("Consolas", 10, "bold"),
+                 fg=secundario, bg=fundo).pack(pady=(0, 8))
+        texto_botao = "Ativar tema escuro" if self.tema_claro else "Ativar tema claro"
+        self.botao_tema = tk.Button(self.janela_config, text=texto_botao,
+                                    command=self.alternar_tema, font=("Segoe UI", 10),
+                                    fg=texto, bg=painel, activebackground="#e2e5ea" if self.tema_claro else "#20232b",
+                                    activeforeground=texto, relief="flat", cursor="hand2", padx=18, pady=9)
+        self.botao_tema.pack()
 
     def sobre(self):
-        messagebox.showinfo('Sobre', 'FREDDY SECURITY SYSTEM\nInterface de monitoramento do projeto case mod.')
+        messagebox.showinfo('Sobre', 'FREDDY SECURITY SYSTEM\nSistema de monitoramento com câmera e detecção de movimento, integrado ao Arduino para ajudar a manter o ambiente protegido..')
 
     def fechar(self):
         if self.video is not None:
