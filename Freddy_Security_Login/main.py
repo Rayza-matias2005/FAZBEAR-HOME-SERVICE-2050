@@ -123,11 +123,10 @@ class TelaLogin:
         self.criar_interface()
 
     def criar_interface(self):
-        # Nova opção: painel central de acesso com visual de terminal de segurança.
         fundo = tk.Frame(self.janela, bg="#050609")
         fundo.pack(fill="both", expand=True)
 
-        # Barra superior
+        
         topo = tk.Frame(fundo, bg="#0a0c12", height=48)
         topo.pack(fill="x", padx=18, pady=(18, 0))
         topo.pack_propagate(False)
@@ -142,14 +141,13 @@ class TelaLogin:
             font=("Consolas", 9), fg="#8292aa", bg="#0a0c12"
         ).pack(side="right", padx=18)
 
-        # Conteúdo principal em duas colunas.
         conteudo = tk.Frame(fundo, bg="#050609")
         conteudo.pack(fill="both", expand=True, padx=48, pady=32)
         conteudo.grid_columnconfigure(0, weight=1)
         conteudo.grid_columnconfigure(1, weight=1)
         conteudo.grid_rowconfigure(0, weight=1)
 
-        # Painel esquerdo: identidade e status.
+
         esquerda = tk.Frame(
             conteudo, bg="#07090e",
             highlightbackground="#242a35", highlightthickness=1
@@ -200,7 +198,6 @@ class TelaLogin:
                 fg="#8292aa", bg="#07090e", anchor="w"
             ).pack(anchor="w", pady=(3, 0))
 
-        # Painel direito: formulário de login.
         direita = tk.Frame(
             conteudo, bg="#090c12",
             highlightbackground=VERMELHO, highlightthickness=1
@@ -446,7 +443,7 @@ class TelaLogin:
 
                     novo_salt, novo_hash = gerar_senha(nova_senha)
                     conexao.execute(
-                        "UPDATE usuarios SET salt = ?, senha = ? WHERE id = ?",
+                        "UPDATE usuarios SET salt = ?, senha = ?, recovery_salt = NULL, recovery_hash = NULL WHERE id = ?",
                         (novo_salt, novo_hash, registro[0])
                     )
 
@@ -601,7 +598,6 @@ class FreddySecurity:
         tk.Label(menu, text='FREDDY', font=('Consolas', 22, 'bold'), fg=VERMELHO, bg=PAINEL).pack(pady=(28, 3))
         tk.Label(menu, text='HOME SERVICE 2050', font=('Consolas', 8), fg=CINZA, bg=PAINEL).pack(pady=(0, 35))
         self.carregar_logo(menu)
-        self.botao(menu, '▣  CÂMERA AO VIVO', self.abrir_camera)
         self.botao(menu, '▷  GRAVAÇÕES', self.gravacoes)
         self.botao(menu, '⚙  CONFIGURAÇÕES', self.configuracoes)
         self.botao(menu, 'ⓘ  SOBRE', self.sobre)
@@ -615,7 +611,7 @@ class FreddySecurity:
         monitor.grid_columnconfigure(0, weight=1)
         barra = tk.Frame(monitor, bg='#000000')
         barra.grid(row=0, column=0, sticky='ew', padx=12, pady=10)
-        tk.Label(barra, text='● CÂMERA 01 - OLHO DIREITO', font=('Consolas', 10, 'bold'), fg=BRANCO, bg='#000000').pack(side='left')
+        tk.Label(barra, text='● CÂMERA AO VIVO', font=('Consolas', 10, 'bold'), fg=BRANCO, bg='#000000').pack(side='left')
         tk.Label(barra, text='LIVE', font=('Consolas', 10, 'bold'), fg=VERMELHO, bg='#000000').pack(side='right')
         self.tela = tk.Label(monitor, text='', bg='#030407', fg=CINZA, font=('Consolas', 15), compound='center')
         self.tela.grid(row=1, column=0, sticky='nsew', padx=10, pady=(0, 10))
@@ -749,6 +745,12 @@ class FreddySecurity:
                 imagem.thumbnail((largura, altura))
                 self.imagem_tk = ImageTk.PhotoImage(imagem)
                 self.tela.config(image=self.imagem_tk, text='')
+            else:
+                self.movimento_camera = False
+                self.frame_anterior = None
+        else:
+            self.movimento_camera = False
+            self.frame_anterior = None
         movimento_detectado = self.sensor_arduino or self.movimento_camera
         self.enviar_comando_arduino(movimento_detectado)
         self.janela.after(30, self.atualizar_imagem)
@@ -761,7 +763,7 @@ class FreddySecurity:
         if self.frame is None:
             messagebox.showinfo('Freddy Security', 'Aguardando a webcam para capturar uma foto.')
             return
-        nome = datetime.now().strftime('freddy_%Y%m%d_%H%M%S.jpg')
+        nome = os.path.join(os.path.dirname(os.path.abspath(__file__)), datetime.now().strftime('freddy_%Y%m%d_%H%M%S.jpg'))
         if cv2.imwrite(nome, self.frame):
             self.rodape.config(text=f'FOTO SALVA: {nome}')
         else:
@@ -774,7 +776,7 @@ class FreddySecurity:
             messagebox.showinfo('Freddy Security', 'Conecte a webcam antes de iniciar a gravação.')
             return
         altura, largura = self.frame.shape[:2]
-        self.nome_video = datetime.now().strftime('freddy_%Y%m%d_%H%M%S.avi')
+        self.nome_video = os.path.join(os.path.dirname(os.path.abspath(__file__)), datetime.now().strftime('freddy_%Y%m%d_%H%M%S.avi'))
         codec = cv2.VideoWriter_fourcc(*'MJPG')
         self.video = cv2.VideoWriter(self.nome_video, codec, 20.0, (largura, altura))
         if not self.video.isOpened():
