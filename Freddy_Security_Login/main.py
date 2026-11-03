@@ -19,10 +19,9 @@ CINZA = "#858b98"
 VERDE = "#24cf54"
 BORDA = "#282b35"
 
-CAMERA_ID = 1
+CAMERA_ID = 0
 PORTA_ARDUINO = "COM3"
 BAUD_RATE = 9600
-LIMIAR_MOVIMENTO = 1500
 
 PASTA_PROJETO = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(PASTA_PROJETO, "freddy.db")
@@ -578,9 +577,11 @@ class FreddySecurity:
         self.logo_tk = None
         self.arduino = None
         self.sensor_arduino = False
-        self.movimento_camera = False
+        self.presenca_camera = False
+        self.detector_rosto = cv2.CascadeClassifier(
+            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        )
         self.estado_enviado = None
-        self.frame_anterior = None
         self.criar_interface()
         if self.tema_claro:
             self.aplicar_tema(self.janela)
@@ -710,20 +711,20 @@ class FreddySecurity:
         except (serial.SerialException, OSError) as erro:
             print(f'Erro enviando comando ao Arduino: {erro}')
 
-    def detectar_movimento_camera(self, frame):
-        cinza = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        cinza = cv2.GaussianBlur(cinza, (21, 21), 0)
-        if self.frame_anterior is None:
-            self.frame_anterior = cinza
-            self.movimento_camera = False
+    def detectar_presenca_camera(self, frame):
+        if self.detector_rosto.empty():
+            self.presenca_camera = False
             return False
-        diferenca = cv2.absdiff(self.frame_anterior, cinza)
-        _, mascara = cv2.threshold(diferenca, 25, 255, cv2.THRESH_BINARY)
-        mascara = cv2.dilate(mascara, None, iterations=2)
-        pixels_movimento = cv2.countNonZero(mascara)
-        self.frame_anterior = cinza
-        self.movimento_camera = pixels_movimento > LIMIAR_MOVIMENTO
-        return self.movimento_camera
+        cinza = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        cinza = cv2.resize(cinza, None, fx=0.5, fy=0.5)
+        rostos = self.detector_rosto.detectMultiScale(
+            cinza,
+            scaleFactor=1.1,
+            minNeighbors=6,
+            minSize=(40, 40)
+        )
+        self.presenca_camera = len(rostos) > 0
+        return self.presenca_camera
 
     def conectar_camera(self):
         if self.camera is not None:
@@ -746,7 +747,7 @@ class FreddySecurity:
             ok, frame = self.camera.read()
             if ok:
                 self.frame = frame.copy()
-                self.detectar_movimento_camera(frame)
+                self.detectar_presenca_camera(frame)
                 if self.gravando and self.video is not None:
                     self.video.write(frame)
                 frame_exibido = cv2.flip(frame, 1)
@@ -758,12 +759,10 @@ class FreddySecurity:
                 self.imagem_tk = ImageTk.PhotoImage(imagem)
                 self.tela.config(image=self.imagem_tk, text='')
             else:
-                self.movimento_camera = False
-                self.frame_anterior = None
+                self.presenca_camera = False
         else:
-            self.movimento_camera = False
-            self.frame_anterior = None
-        sinal_movimento = self.sensor_arduino or self.movimento_camera
+            self.presenca_camera = False
+        sinal_movimento = self.sensor_arduino or self.presenca_camera
         agora = time.monotonic()
         estado_anterior = self.movimento_ativo
 
@@ -850,15 +849,15 @@ class FreddySecurity:
 
     def registrar_movimento(self):
         origens = []
-        if self.movimento_camera:
+        if self.presenca_camera:
             origens.append("c\u00e2mera")
         if self.sensor_arduino:
             origens.append("sensor")
         horario = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
         try:
             with open(ARQUIVO_MOVIMENTOS, "a", encoding="utf-8") as arquivo:
-                arquivo.write(f"{horario} - Movimento detectado ({' + '.join(origens)})\n")
-            self.rodape.config(text=f"MOVIMENTO DETECTADO | {horario}")
+                arquivo.write(f"{horario} - Presen\u00e7a detectada ({' + '.join(origens)})\n")
+            self.rodape.config(text=f"PRESEN\u00c7A DETECTADA | {horario}")
         except OSError as erro:
             print(f"N\u00e3o foi poss\u00edvel registrar o movimento: {erro}")
 
@@ -906,10 +905,10 @@ class FreddySecurity:
             messagebox.showerror("Movimentos", f"N\u00e3o foi poss\u00edvel ler o registro: {erro}", parent=self.janela_gravacoes)
             return
         if not linhas:
-            texto = "Ainda n\u00e3o h\u00e1 movimentos registrados."
+            texto = "Ainda n\u00e3o h\u00e1 presen\u00e7as registradas."
         else:
             texto = "\n".join(linha.rstrip() for linha in linhas[-20:])
-        messagebox.showinfo("Movimentos recentes", texto, parent=self.janela_gravacoes)
+        messagebox.showinfo("Presen\u00e7as recentes", texto, parent=self.janela_gravacoes)
 
     def gravacoes(self):
         if hasattr(self, "janela_gravacoes") and self.janela_gravacoes.winfo_exists():
@@ -941,7 +940,7 @@ class FreddySecurity:
         botoes.pack(fill="x", padx=16, pady=(0, 16))
         for rotulo, comando in (("Abrir", self.abrir_gravacao_selecionada),
                                 ("Atualizar", self.atualizar_lista_gravacoes),
-                                ("Movimentos", self.movimentos),
+                                ("Presen\u00e7as", self.movimentos),
                                 ("Abrir pasta", self.abrir_pasta_gravacoes)):
             tk.Button(botoes, text=rotulo, command=comando, font=("Segoe UI", 9),
                       fg=texto, bg=painel, activebackground=VERMELHO,
