@@ -10,6 +10,11 @@ import sqlite3
 import hashlib
 import secrets
 import json
+import html
+import socket
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import quote, unquote, urlparse
 
 FUNDO = "#050609"
 PAINEL = "#0c0e13"
@@ -19,7 +24,7 @@ CINZA = "#858b98"
 VERDE = "#24cf54"
 BORDA = "#282b35"
 
-CAMERA_ID = 0
+CAMERA_ID = 1
 PORTA_ARDUINO = "COM3"
 BAUD_RATE = 9600
 
@@ -27,6 +32,83 @@ PASTA_PROJETO = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(PASTA_PROJETO, "freddy.db")
 ARQUIVO_TEMA = os.path.join(PASTA_PROJETO, "freddy_config.json")
 ARQUIVO_MOVIMENTOS = os.path.join(PASTA_PROJETO, "movimentos.log")
+PORTA_WEB = 8765
+
+
+class ServidorGravacoes(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+class ManipuladorGravacoes(BaseHTTPRequestHandler):
+    def do_GET(self):
+        caminho_url = urlparse(self.path).path
+        if caminho_url == "/":
+            self.enviar_pagina()
+        elif caminho_url.startswith("/video/"):
+            self.enviar_video(unquote(caminho_url[len("/video/"):]))
+        else:
+            self.send_error(404)
+
+    def enviar_pagina(self):
+        arquivos = []
+        try:
+            for nome in os.listdir(PASTA_PROJETO):
+                caminho = os.path.join(PASTA_PROJETO, nome)
+                if (nome.lower().startswith("freddy_") and nome.lower().endswith(".avi")
+                        and os.path.isfile(caminho)):
+                    arquivos.append((nome, os.path.getmtime(caminho)))
+        except OSError:
+            arquivos = []
+        arquivos.sort(key=lambda item: item[1], reverse=True)
+        if arquivos:
+            itens = "".join(
+                f'<li><span>{html.escape(nome)}</span> '
+                f'<a href="/video/{quote(nome)}">Baixar vídeo</a></li>'
+                for nome, _ in arquivos
+            )
+        else:
+            itens = "<li>Nenhuma gravação encontrada ainda.</li>"
+        pagina = (
+            "<!doctype html><html lang='pt-br'><meta charset='utf-8'>"
+            "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+            "<title>Gravações Freddy Security</title>"
+            "<style>body{font:17px Arial;background:#101218;color:#eee;margin:24px}"
+            "h1{color:#e31837}li{background:#20232b;padding:14px;margin:10px 0;"
+            "border-radius:8px;overflow-wrap:anywhere}a{color:#ff7587;display:block;"
+            "margin-top:9px}</style><h1>Gravações</h1><ul>" + itens + "</ul></html>"
+        ).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(pagina)))
+        self.end_headers()
+        self.wfile.write(pagina)
+
+    def enviar_video(self, nome):
+        if (not nome or os.path.basename(nome) != nome or not nome.lower().startswith("freddy_")
+                or not nome.lower().endswith(".avi")):
+            self.send_error(404)
+            return
+        caminho = os.path.join(PASTA_PROJETO, nome)
+        if not os.path.isfile(caminho):
+            self.send_error(404)
+            return
+        try:
+            tamanho = os.path.getsize(caminho)
+            nome_download = quote(nome)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(tamanho))
+            self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{nome_download}")
+            self.end_headers()
+            with open(caminho, "rb") as arquivo:
+                while bloco := arquivo.read(64 * 1024):
+                    self.wfile.write(bloco)
+        except (OSError, BrokenPipeError):
+            pass
+
+    def log_message(self, formato, *args):
+        pass
 
 def conectar_banco():
     conexao = sqlite3.connect(DB_PATH)
@@ -572,10 +654,13 @@ class FreddySecurity:
         self.frame = None
         self.imagem_tk = None
         self.gravando = False
+        self.gravacao_automatica = False
+        self.fim_gravacao_automatica = None
         self.video = None
         self.nome_video = None
         self.logo_tk = None
         self.arduino = None
+        self.servidor_web = None
         self.sensor_arduino = False
         self.presenca_camera = False
         self.detector_rosto = cv2.CascadeClassifier(
@@ -583,6 +668,7 @@ class FreddySecurity:
         )
         self.estado_enviado = None
         self.criar_interface()
+        self.iniciar_servidor_web()
         if self.tema_claro:
             self.aplicar_tema(self.janela)
         self.conectar_arduino()
@@ -612,6 +698,7 @@ class FreddySecurity:
         tk.Label(menu, text='HOME SERVICE 2050', font=('Consolas', 8), fg=CINZA, bg=PAINEL).pack(pady=(0, 35))
         self.carregar_logo(menu)
         self.botao(menu, '▷  GRAVAÇÕES', self.gravacoes)
+        self.botao(menu, '▣  ACESSO NO CELULAR', self.mostrar_acesso_celular)
         self.botao(menu, '⚙  CONFIGURAÇÕES', self.configuracoes)
         self.botao(menu, 'ⓘ  SOBRE', self.sobre)
         centro = tk.Frame(corpo, bg=FUNDO)
@@ -665,6 +752,39 @@ class FreddySecurity:
 
     def botao(self, pai, texto, comando):
         tk.Button(pai, text=texto, command=comando, anchor='w', padx=12, pady=14, font=('Consolas', 9), fg=BRANCO, bg=PAINEL, activebackground=VERMELHO, activeforeground=BRANCO, relief='flat', cursor='hand2').pack(fill='x', padx=7, pady=3)
+
+    def iniciar_servidor_web(self):
+        try:
+            self.servidor_web = ServidorGravacoes(("0.0.0.0", PORTA_WEB), ManipuladorGravacoes)
+            threading.Thread(target=self.servidor_web.serve_forever, daemon=True).start()
+        except OSError as erro:
+            self.servidor_web = None
+            print(f"Não foi possível iniciar o acesso pelo celular: {erro}")
+
+    def mostrar_acesso_celular(self):
+        if self.servidor_web is None:
+            messagebox.showerror(
+                "Acesso pelo celular",
+                f"Não foi possível iniciar a página. Talvez a porta {PORTA_WEB} já esteja sendo usada."
+            )
+            return
+        endereco_ip = ""
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as conexao:
+                conexao.connect(("192.0.2.1", 1))
+                endereco_ip = conexao.getsockname()[0]
+        except OSError:
+            pass
+        if not endereco_ip:
+            messagebox.showerror("Acesso pelo celular", "Não consegui identificar o IP do computador na rede.")
+            return
+        endereco = f"http://{endereco_ip}:{PORTA_WEB}"
+        messagebox.showinfo(
+            "Acesso pelo celular",
+            "Conecte o celular à mesma rede Wi-Fi do computador e abra este endereço no navegador:\n\n"
+            f"{endereco}\n\n"
+            "Toque em 'Baixar vídeo' para salvar uma gravação no celular."
+        )
 
     def linha(self, pai, nome, valor):
         linha = tk.Frame(pai, bg=PAINEL)
@@ -730,7 +850,7 @@ class FreddySecurity:
         if self.camera is not None:
             self.camera.release()
             self.camera = None
-        self.camera = cv2.VideoCapture(CAMERA_ID)
+        self.camera = cv2.VideoCapture(CAMERA_ID, cv2.CAP_DSHOW)
         if self.camera.isOpened():
             self.status_camera.config(text='Conectada', fg=VERDE)
             self.rodape.config(text='WEBCAM CONECTADA | SISTEMA ATIVO')
@@ -762,6 +882,9 @@ class FreddySecurity:
                 self.presenca_camera = False
         else:
             self.presenca_camera = False
+        if (self.gravacao_automatica and self.fim_gravacao_automatica is not None
+                and time.monotonic() >= self.fim_gravacao_automatica):
+            self.finalizar_gravacao()
         sinal_movimento = self.sensor_arduino or self.presenca_camera
         agora = time.monotonic()
         estado_anterior = self.movimento_ativo
@@ -779,6 +902,7 @@ class FreddySecurity:
 
         if self.movimento_ativo and not estado_anterior:
             self.registrar_movimento()
+            self.iniciar_gravacao(automatica=True)
         self.enviar_comando_arduino(self.movimento_ativo)
         self.janela.after(30, self.atualizar_imagem)
 
@@ -796,11 +920,12 @@ class FreddySecurity:
         else:
             messagebox.showerror('Erro', 'Não foi possível salvar a foto.')
 
-    def iniciar_gravacao(self):
+    def iniciar_gravacao(self, automatica=False):
         if self.gravando:
             return
         if self.camera is None or self.frame is None:
-            messagebox.showinfo('Freddy Security', 'Conecte a webcam antes de iniciar a gravação.')
+            if not automatica:
+                messagebox.showinfo('Freddy Security', 'Conecte a webcam antes de iniciar a gravação.')
             return
         altura, largura = self.frame.shape[:2]
         self.nome_video = os.path.join(PASTA_PROJETO, datetime.now().strftime('freddy_%Y%m%d_%H%M%S.avi'))
@@ -809,9 +934,14 @@ class FreddySecurity:
         if not self.video.isOpened():
             self.video.release()
             self.video = None
-            messagebox.showerror('Erro', 'Não foi possível iniciar a gravação.')
+            if not automatica:
+                messagebox.showerror('Erro', 'Não foi possível iniciar a gravação.')
+            else:
+                print('Não foi possível iniciar a gravação automática.')
             return
         self.gravando = True
+        self.gravacao_automatica = automatica
+        self.fim_gravacao_automatica = time.monotonic() + 5 if automatica else None
         self.status_gravacao.config(text='● GRAVAÇÃO ATIVA', fg=VERMELHO)
         self.rodape.config(text=f'GRAVANDO: {self.nome_video}')
 
@@ -819,13 +949,25 @@ class FreddySecurity:
         if not self.gravando:
             messagebox.showinfo('Freddy Security', 'Não existe uma gravação em andamento.')
             return
+        nome_video = self.nome_video
+        automatica = self.gravacao_automatica
+        self.finalizar_gravacao()
+        if not automatica:
+            messagebox.showinfo('Freddy Security', f'Gravação encerrada e salva!\n\n{nome_video}')
+
+    def finalizar_gravacao(self):
+        if not self.gravando:
+            return
         self.gravando = False
         if self.video is not None:
             self.video.release()
             self.video = None
+        self.gravacao_automatica = False
+        self.fim_gravacao_automatica = None
         self.status_gravacao.config(text='● GRAVAÇÃO INATIVA', fg=CINZA)
         self.rodape.config(text=f'GRAVAÇÃO SALVA: {self.nome_video}')
-        messagebox.showinfo('Freddy Security', f'Gravação encerrada e salva!\n\n{self.nome_video}')
+        if hasattr(self, 'lista_gravacoes') and self.lista_gravacoes.winfo_exists():
+            self.atualizar_lista_gravacoes()
 
     def abrir_camera(self):
         if self.camera is None or not self.camera.isOpened():
@@ -1024,6 +1166,10 @@ class FreddySecurity:
         messagebox.showinfo('Sobre', 'FREDDY SECURITY SYSTEM\nSistema de monitoramento com câmera e detecção de movimento, integrado ao Arduino para ajudar a manter o ambiente protegido..')
 
     def fechar(self):
+        if self.servidor_web is not None:
+            self.servidor_web.shutdown()
+            self.servidor_web.server_close()
+            self.servidor_web = None
         if self.video is not None:
             self.video.release()
             self.video = None
