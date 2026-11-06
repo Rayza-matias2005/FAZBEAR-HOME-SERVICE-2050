@@ -11,10 +11,10 @@ import hashlib
 import secrets
 import json
 import html
-import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import quote, unquote, urlparse
+from urllib.request import urlopen
 
 FUNDO = "#050609"
 PAINEL = "#0c0e13"
@@ -24,7 +24,7 @@ CINZA = "#858b98"
 VERDE = "#24cf54"
 BORDA = "#282b35"
 
-CAMERA_ID = 1
+CAMERA_ID = 0
 PORTA_ARDUINO = "COM3"
 BAUD_RATE = 9600
 
@@ -47,6 +47,8 @@ class ManipuladorGravacoes(BaseHTTPRequestHandler):
             self.enviar_pagina()
         elif caminho_url.startswith("/video/"):
             self.enviar_video(unquote(caminho_url[len("/video/"):]))
+        elif caminho_url.startswith("/stream/"):
+            self.transmitir_video(unquote(caminho_url[len("/stream/"):]))
         else:
             self.send_error(404)
 
@@ -62,22 +64,52 @@ class ManipuladorGravacoes(BaseHTTPRequestHandler):
             arquivos = []
         arquivos.sort(key=lambda item: item[1], reverse=True)
         if arquivos:
-            itens = "".join(
-                f'<li><span>{html.escape(nome)}</span> '
-                f'<a href="/video/{quote(nome)}">Baixar vídeo</a></li>'
-                for nome, _ in arquivos
-            )
+            cartoes = []
+            for nome, alterado_em in arquivos:
+                seguro = html.escape(nome)
+                url_stream = html.escape("/stream/" + quote(nome, safe=""))
+                url_download = html.escape("/video/" + quote(nome, safe=""))
+                tamanho = os.path.getsize(os.path.join(PASTA_PROJETO, nome))
+                tamanho_mb = tamanho / (1024 * 1024)
+                data = datetime.fromtimestamp(alterado_em).strftime("%d/%m/%Y às %H:%M")
+                cartoes.append(
+                    f"<article class='card'><div class='player'><img class='tela' "
+                    f"alt='Reprodução de {seguro}'></div><div class='detalhes'>"
+                    f"<h2>{seguro}</h2><p>{data} · {tamanho_mb:.1f} MB</p>"
+                    f"<div class='acoes'><button onclick=\"assistir(this,'{url_stream}')\">▶ Assistir</button>"
+                    f"<a class='baixar' href='{url_download}'>⇩ Baixar</a></div></div></article>"
+                )
+            conteudo = "".join(cartoes)
         else:
-            itens = "<li>Nenhuma gravação encontrada ainda.</li>"
-        pagina = (
-            "<!doctype html><html lang='pt-br'><meta charset='utf-8'>"
-            "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-            "<title>Gravações Freddy Security</title>"
-            "<style>body{font:17px Arial;background:#101218;color:#eee;margin:24px}"
-            "h1{color:#e31837}li{background:#20232b;padding:14px;margin:10px 0;"
-            "border-radius:8px;overflow-wrap:anywhere}a{color:#ff7587;display:block;"
-            "margin-top:9px}</style><h1>Gravações</h1><ul>" + itens + "</ul></html>"
-        ).encode("utf-8")
+            conteudo = "<div class='vazio'>Ainda não há gravações salvas.</div>"
+        pagina = f"""<!doctype html>
+<html lang="pt-br"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Gravações | Freddy Security</title>
+<style>
+:root{{--fundo:#0b0d12;--painel:#151922;--borda:#252b36;--texto:#f2f3f5;--muted:#9299a6;--red:#e31837}}
+*{{box-sizing:border-box}}body{{margin:0;background:radial-gradient(ellipse at top,#231019 0,#0b0d12 48%);color:var(--texto);font:16px 'Segoe UI',Arial,sans-serif;min-height:100vh}}
+header{{max-width:980px;margin:auto;padding:30px 20px 20px;display:flex;align-items:center;gap:15px}}
+.logo{{width:52px;height:52px;border-radius:16px;background:var(--red);display:grid;place-items:center;font-weight:800;font-size:25px;box-shadow:0 8px 30px #e3183740}}
+h1{{font-size:clamp(24px,5vw,34px);margin:0}}header p{{margin:5px 0 0;color:var(--muted)}}
+main{{max-width:980px;margin:auto;padding:0 20px 36px}}.resumo{{color:var(--muted);margin:4px 0 18px}}
+.lista{{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,360px),1fr));gap:16px}}
+.card{{overflow:hidden;border:1px solid var(--borda);border-radius:18px;background:linear-gradient(145deg,#191e28,#11141b);box-shadow:0 14px 35px #0005}}
+.player{{background:#050608;aspect-ratio:16/9;display:grid;place-items:center}}.tela{{display:none;width:100%;height:100%;object-fit:contain}}
+.detalhes{{padding:16px}}h2{{font-size:16px;overflow-wrap:anywhere;margin:0 0 7px}}.detalhes p{{font-size:13px;color:var(--muted);margin:0 0 15px}}
+.acoes{{display:flex;gap:10px}}button,.baixar{{border:0;border-radius:10px;padding:11px 15px;font:600 14px 'Segoe UI',Arial;cursor:pointer;text-decoration:none;text-align:center}}
+button{{background:var(--red);color:white;flex:1}}button:active{{transform:scale(.98)}}.baixar{{background:#282e39;color:var(--texto);min-width:112px}}
+.vazio{{background:var(--painel);border:1px solid var(--borda);border-radius:16px;color:var(--muted);padding:28px;text-align:center}}
+footer{{max-width:980px;margin:auto;padding:0 20px 24px;color:#747b88;font-size:12px}}
+</style></head><body>
+<header><div class="logo">F</div><div style="flex:1"><h1>Suas gravações</h1><p>Freddy Security · </p></div><a class="baixar" href="/">↻ Atualizar</a></header>
+<main><p class="resumo">{len(arquivos)} vídeo(s) · toque em Assistir para ver sem baixar</p><section class="lista">{conteudo}</section></main>
+<footer>Os vídeos são enviados pelo computador enquanto o Freddy Security está aberto.</footer>
+<script>
+function assistir(botao,url){{const tela=botao.closest('.card').querySelector('.tela');
+if(botao.dataset.tocando==='1'){{tela.src='';tela.style.display='none';botao.dataset.tocando='0';botao.textContent='▶ Assistir';return;}}
+tela.src=url+'?t='+Date.now();tela.style.display='block';botao.dataset.tocando='1';botao.textContent='■ Parar';}}
+</script></body></html>""".encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(pagina)))
@@ -85,12 +117,8 @@ class ManipuladorGravacoes(BaseHTTPRequestHandler):
         self.wfile.write(pagina)
 
     def enviar_video(self, nome):
-        if (not nome or os.path.basename(nome) != nome or not nome.lower().startswith("freddy_")
-                or not nome.lower().endswith(".avi")):
-            self.send_error(404)
-            return
-        caminho = os.path.join(PASTA_PROJETO, nome)
-        if not os.path.isfile(caminho):
+        caminho = self.caminho_gravacao(nome)
+        if not caminho:
             self.send_error(404)
             return
         try:
@@ -106,6 +134,53 @@ class ManipuladorGravacoes(BaseHTTPRequestHandler):
                     self.wfile.write(bloco)
         except (OSError, BrokenPipeError):
             pass
+
+    def transmitir_video(self, nome):
+        caminho = self.caminho_gravacao(nome)
+        if not caminho:
+            self.send_error(404)
+            return
+        captura = cv2.VideoCapture(caminho)
+        if not captura.isOpened():
+            captura.release()
+            self.send_error(500, "Não foi possível abrir esta gravação")
+            return
+        fps = captura.get(cv2.CAP_PROP_FPS)
+        intervalo = 1.0 / fps if fps and fps > 0 else 1.0 / 20.0
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            while True:
+                inicio = time.monotonic()
+                ok, quadro = captura.read()
+                if not ok:
+                    break
+                ok, imagem = cv2.imencode(".jpg", quadro)
+                if not ok:
+                    continue
+                dados = imagem.tobytes()
+                self.wfile.write(
+                    b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
+                    + str(len(dados)).encode("ascii") + b"\r\n\r\n" + dados + b"\r\n"
+                )
+                atraso = intervalo - (time.monotonic() - inicio)
+                if atraso > 0:
+                    time.sleep(atraso)
+        except (OSError, BrokenPipeError):
+            pass
+        finally:
+            captura.release()
+
+    @staticmethod
+    def caminho_gravacao(nome):
+        if (not nome or os.path.basename(nome) != nome or not nome.lower().startswith("freddy_")
+                or not nome.lower().endswith(".avi")):
+            return None
+        caminho = os.path.join(PASTA_PROJETO, nome)
+        return caminho if os.path.isfile(caminho) else None
 
     def log_message(self, formato, *args):
         pass
@@ -768,22 +843,34 @@ class FreddySecurity:
                 f"Não foi possível iniciar a página. Talvez a porta {PORTA_WEB} já esteja sendo usada."
             )
             return
-        endereco_ip = ""
+        endereco = ""
         try:
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as conexao:
-                conexao.connect(("192.0.2.1", 1))
-                endereco_ip = conexao.getsockname()[0]
-        except OSError:
+            with urlopen("http://127.0.0.1:4040/api/tunnels", timeout=2) as resposta:
+                tunel = json.loads(resposta.read().decode("utf-8"))
+            endereco = next(
+                (item.get("public_url", "") for item in tunel.get("tunnels", [])
+                 if item.get("public_url", "").startswith("https://")),
+                ""
+            )
+        except (OSError, ValueError, KeyError):
             pass
-        if not endereco_ip:
-            messagebox.showerror("Acesso pelo celular", "Não consegui identificar o IP do computador na rede.")
+        if not endereco:
+            messagebox.showinfo(
+                "Acesso pelo ngrok",
+                "O túnel ngrok ainda não está ativo. Com o Freddy Security aberto, abra outra janela "
+                "do PowerShell e execute:\n\n"
+                "ngrok http 8765\n\n"
+                "Troque usuário e senha por valores seus, mantenha essa janela aberta e clique "
+                "novamente em 'Acesso no celular'."
+            )
             return
-        endereco = f"http://{endereco_ip}:{PORTA_WEB}"
         messagebox.showinfo(
-            "Acesso pelo celular",
-            "Conecte o celular à mesma rede Wi-Fi do computador e abra este endereço no navegador:\n\n"
+            "Acesso pelo ngrok",
+            "Abra este endereço no navegador do celular e informe o usuário e a senha do ngrok:\n\n"
             f"{endereco}\n\n"
-            "Toque em 'Baixar vídeo' para salvar uma gravação no celular."
+            "Na página, toque em 'Assistir' para ver sem baixar ou em 'Baixar' para salvar o vídeo. "
+            "Deixe o computador, o Freddy Security "
+            "e a janela do ngrok ligados."
         )
 
     def linha(self, pai, nome, valor):
