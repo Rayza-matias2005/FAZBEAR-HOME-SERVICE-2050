@@ -6,7 +6,7 @@ from PIL import Image, ImageTk
 import os
 import serial
 import time
-import sqlite3
+import mysql.connector
 import hashlib
 import secrets
 import json
@@ -29,7 +29,9 @@ PORTA_ARDUINO = "COM3"
 BAUD_RATE = 9600
 
 PASTA_PROJETO = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(PASTA_PROJETO, "freddy.db")
+PASTA_MIDIA = os.path.join(PASTA_PROJETO, "Gravacoes_e_Fotos")
+os.makedirs(PASTA_MIDIA, exist_ok=True)
+MYSQL_CONFIG_PATH = os.path.join(PASTA_PROJETO, "mysql_config.json")
 ARQUIVO_TEMA = os.path.join(PASTA_PROJETO, "freddy_config.json")
 ARQUIVO_MOVIMENTOS = os.path.join(PASTA_PROJETO, "movimentos.log")
 PORTA_WEB = 8765
@@ -55,8 +57,8 @@ class ManipuladorGravacoes(BaseHTTPRequestHandler):
     def enviar_pagina(self):
         arquivos = []
         try:
-            for nome in os.listdir(PASTA_PROJETO):
-                caminho = os.path.join(PASTA_PROJETO, nome)
+            for nome in os.listdir(PASTA_MIDIA):
+                caminho = os.path.join(PASTA_MIDIA, nome)
                 if (nome.lower().startswith("freddy_") and nome.lower().endswith(".avi")
                         and os.path.isfile(caminho)):
                     arquivos.append((nome, os.path.getmtime(caminho)))
@@ -69,7 +71,7 @@ class ManipuladorGravacoes(BaseHTTPRequestHandler):
                 seguro = html.escape(nome)
                 url_stream = html.escape("/stream/" + quote(nome, safe=""))
                 url_download = html.escape("/video/" + quote(nome, safe=""))
-                tamanho = os.path.getsize(os.path.join(PASTA_PROJETO, nome))
+                tamanho = os.path.getsize(os.path.join(PASTA_MIDIA, nome))
                 tamanho_mb = tamanho / (1024 * 1024)
                 data = datetime.fromtimestamp(alterado_em).strftime("%d/%m/%Y às %H:%M")
                 cartoes.append(
@@ -102,7 +104,7 @@ button{{background:var(--red);color:white;flex:1}}button:active{{transform:scale
 .vazio{{background:var(--painel);border:1px solid var(--borda);border-radius:16px;color:var(--muted);padding:28px;text-align:center}}
 footer{{max-width:980px;margin:auto;padding:0 20px 24px;color:#747b88;font-size:12px}}
 </style></head><body>
-<header><div class="logo">F</div><div style="flex:1"><h1>Suas gravações</h1><p>Freddy Security · </p></div><a class="baixar" href="/">↻ Atualizar</a></header>
+<header><div class="logo">F</div><div style="flex:1"><h1>Suas gravações</h1><p>Freddy Security · arquivos salvos neste computador</p></div><a class="baixar" href="/">↻ Atualizar</a></header>
 <main><p class="resumo">{len(arquivos)} vídeo(s) · toque em Assistir para ver sem baixar</p><section class="lista">{conteudo}</section></main>
 <footer>Os vídeos são enviados pelo computador enquanto o Freddy Security está aberto.</footer>
 <script>
@@ -179,34 +181,21 @@ tela.src=url+'?t='+Date.now();tela.style.display='block';botao.dataset.tocando='
         if (not nome or os.path.basename(nome) != nome or not nome.lower().startswith("freddy_")
                 or not nome.lower().endswith(".avi")):
             return None
-        caminho = os.path.join(PASTA_PROJETO, nome)
+        caminho = os.path.join(PASTA_MIDIA, nome)
         return caminho if os.path.isfile(caminho) else None
 
     def log_message(self, formato, *args):
         pass
 
 def conectar_banco():
-    conexao = sqlite3.connect(DB_PATH)
-    conexao.execute("""
-        CREATE TABLE IF NOT EXISTS usuarios (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            usuario TEXT NOT NULL UNIQUE COLLATE NOCASE,
-            salt TEXT NOT NULL,
-            senha TEXT NOT NULL,
-            criado_em TEXT NOT NULL,
-            recovery_salt TEXT,
-            recovery_hash TEXT
-        )
-    """)
-    colunas = {
-        linha[1] for linha in conexao.execute("PRAGMA table_info(usuarios)").fetchall()
-    }
-    if "recovery_salt" not in colunas:
-        conexao.execute("ALTER TABLE usuarios ADD COLUMN recovery_salt TEXT")
-    if "recovery_hash" not in colunas:
-        conexao.execute("ALTER TABLE usuarios ADD COLUMN recovery_hash TEXT")
-    conexao.commit()
-    return conexao
+    try:
+        with open(MYSQL_CONFIG_PATH, "r", encoding="utf-8") as arquivo:
+            configuracao = json.load(arquivo)
+    except (OSError, json.JSONDecodeError) as erro:
+        raise RuntimeError(f"Nao foi possivel ler {MYSQL_CONFIG_PATH}: {erro}") from erro
+
+    configuracao["port"] = int(configuracao.get("port", 3306))
+    return mysql.connector.connect(**configuracao)
 
 def gerar_senha(senha, salt=None):
     if salt is None:
@@ -222,47 +211,66 @@ def gerar_senha(senha, salt=None):
 def cadastrar_usuario(usuario, senha):
     usuario = usuario.strip()
     if not usuario or not senha:
-        return False, "Preencha o usuário e a senha."
+        return False, "Preencha o usuario e a senha."
     if len(usuario) < 3:
-        return False, "O usuário precisa ter pelo menos 3 caracteres."
+        return False, "O usuario precisa ter pelo menos 3 caracteres."
     if len(senha) < 8:
         return False, "A senha precisa ter pelo menos 8 caracteres."
 
     salt, senha_hash = gerar_senha(senha)
     codigo_recuperacao = secrets.token_hex(4).upper()
     recovery_salt, recovery_hash = gerar_senha(codigo_recuperacao)
+    conexao = None
+    cursor = None
     try:
-        with conectar_banco() as conexao:
-            conexao.execute(
-                """INSERT INTO usuarios
-                   (usuario, salt, senha, criado_em, recovery_salt, recovery_hash)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (
-                    usuario, salt, senha_hash,
-                    datetime.now().isoformat(timespec="seconds"),
-                    recovery_salt, recovery_hash
-                )
+        conexao = conectar_banco()
+        cursor = conexao.cursor()
+        cursor.execute(
+            """INSERT INTO usuarios
+               (usuario, salt, senha, criado_em, recovery_salt, recovery_hash)
+               VALUES (%s, %s, %s, %s, %s, %s)""",
+            (
+                usuario, salt, senha_hash,
+                datetime.now().replace(microsecond=0),
+                recovery_salt, recovery_hash
             )
-        return True, (
-            "Usuário cadastrado com sucesso!\n\n"
-            f"SEU CÓDIGO DE RECUPERAÇÃO: {codigo_recuperacao}\n\n"
-            "Guarde este código em um local seguro. Ele será necessário "
-            "se você esquecer sua senha. Ele não será exibido novamente."
         )
-    except sqlite3.IntegrityError:
-        return False, "Esse nome de usuário já está cadastrado."
-    except sqlite3.Error as erro:
-        return False, f"Erro ao salvar no banco de dados: {erro}"
+        conexao.commit()
+        return True, (
+            "Usuario cadastrado com sucesso!\n\n"
+            f"SEU CODIGO DE RECUPERACAO: {codigo_recuperacao}\n\n"
+            "Guarde este codigo em um local seguro. Ele sera necessario "
+            "se voce esquecer sua senha. Ele nao sera exibido novamente."
+        )
+    except mysql.connector.IntegrityError:
+        return False, "Esse nome de usuario ja esta cadastrado."
+    except (mysql.connector.Error, RuntimeError) as erro:
+        return False, f"Erro ao salvar no MySQL: {erro}"
+    finally:
+        if cursor is not None:
+            cursor.close()
+        if conexao is not None and conexao.is_connected():
+            conexao.close()
+
 
 def validar_login(usuario, senha):
+    conexao = None
+    cursor = None
     try:
-        with conectar_banco() as conexao:
-            registro = conexao.execute(
-                "SELECT salt, senha FROM usuarios WHERE usuario = ?",
-                (usuario.strip(),)
-            ).fetchone()
-    except sqlite3.Error:
-        return False
+        conexao = conectar_banco()
+        cursor = conexao.cursor()
+        cursor.execute(
+            "SELECT salt, senha FROM usuarios WHERE usuario = %s",
+            (usuario.strip(),)
+        )
+        registro = cursor.fetchone()
+    except (mysql.connector.Error, RuntimeError) as erro:
+        raise RuntimeError(f"Falha ao acessar o MySQL: {erro}") from erro
+    finally:
+        if cursor is not None:
+            cursor.close()
+        if conexao is not None and conexao.is_connected():
+            conexao.close()
 
     if registro is None:
         return False
@@ -497,7 +505,13 @@ class TelaLogin:
         usuario = self.entrada_usuario.get().strip()
         senha = self.entrada_senha.get()
 
-        if validar_login(usuario, senha):
+        try:
+            acesso_valido = validar_login(usuario, senha)
+        except RuntimeError as erro:
+            messagebox.showerror("Banco de dados", str(erro), parent=self.janela)
+            return
+
+        if acesso_valido:
             self.ao_entrar(usuario)
         else:
             messagebox.showerror(
@@ -578,38 +592,45 @@ class TelaLogin:
                 )
                 return
 
+            conexao = None
+            cursor = None
             try:
-                with conectar_banco() as conexao:
-                    registro = conexao.execute(
-                        """SELECT id, recovery_salt, recovery_hash
-                           FROM usuarios WHERE usuario = ?""",
-                        (usuario,)
-                    ).fetchone()
+                conexao = conectar_banco()
+                cursor = conexao.cursor()
+                cursor.execute(
+                    """SELECT id, recovery_salt, recovery_hash
+                       FROM usuarios WHERE usuario = %s""",
+                    (usuario,)
+                )
+                registro = cursor.fetchone()
 
-                    if not registro or not registro[1] or not registro[2]:
-                        valido = False
-                    else:
-                        _, codigo_hash = gerar_senha(codigo, registro[1])
-                        valido = secrets.compare_digest(codigo_hash, registro[2])
+                if not registro or not registro[1] or not registro[2]:
+                    valido = False
+                else:
+                    _, codigo_hash = gerar_senha(codigo, registro[1])
+                    valido = secrets.compare_digest(codigo_hash, registro[2])
 
-                    if not valido:
-                        messagebox.showerror(
-                            "Recuperar senha",
-                            "Usuário ou código de recuperação inválido. "
-                            "Confira os dados e tente novamente.",
-                            parent=janela_recuperacao
-                        )
-                        return
-
-                    novo_salt, novo_hash = gerar_senha(nova_senha)
-                    conexao.execute(
-                        "UPDATE usuarios SET salt = ?, senha = ?, recovery_salt = NULL, recovery_hash = NULL WHERE id = ?",
-                        (novo_salt, novo_hash, registro[0])
+                if not valido:
+                    messagebox.showerror(
+                        "Recuperar senha",
+                        "Usuario ou codigo de recuperacao invalido. Confira os dados e tente novamente.",
+                        parent=janela_recuperacao
                     )
+                    return
+
+                novo_salt, novo_hash = gerar_senha(nova_senha)
+                cursor.execute(
+                    """UPDATE usuarios
+                       SET salt = %s, senha = %s,
+                           recovery_salt = NULL, recovery_hash = NULL
+                       WHERE id = %s""",
+                    (novo_salt, novo_hash, registro[0])
+                )
+                conexao.commit()
 
                 messagebox.showinfo(
                     "Recuperar senha",
-                    "Senha redefinida com sucesso! Você já pode entrar com a nova senha.",
+                    "Senha redefinida com sucesso! Voce ja pode entrar com a nova senha.",
                     parent=janela_recuperacao
                 )
                 janela_recuperacao.destroy()
@@ -617,11 +638,16 @@ class TelaLogin:
                 self.entrada_usuario.insert(0, usuario)
                 self.entrada_senha.delete(0, tk.END)
                 self.entrada_senha.focus_set()
-            except sqlite3.Error as erro:
+            except (mysql.connector.Error, RuntimeError) as erro:
                 messagebox.showerror(
-                    "Erro", f"Não foi possível redefinir a senha: {erro}",
+                    "Erro", f"Nao foi possivel redefinir a senha: {erro}",
                     parent=janela_recuperacao
                 )
+            finally:
+                if cursor is not None:
+                    cursor.close()
+                if conexao is not None and conexao.is_connected():
+                    conexao.close()
 
         tk.Button(
             painel, text="REDEFINIR SENHA", command=redefinir,
@@ -860,17 +886,15 @@ class FreddySecurity:
                 "O túnel ngrok ainda não está ativo. Com o Freddy Security aberto, abra outra janela "
                 "do PowerShell e execute:\n\n"
                 "ngrok http 8765\n\n"
-                "Troque usuário e senha por valores seus, mantenha essa janela aberta e clique "
+                "Mantenha essa janela aberta e clique "
                 "novamente em 'Acesso no celular'."
             )
             return
         messagebox.showinfo(
             "Acesso pelo ngrok",
-            "Abra este endereço no navegador do celular e informe o usuário e a senha do ngrok:\n\n"
+            "Abra este endereço no navegador do celular:\n\n"
             f"{endereco}\n\n"
             "Na página, toque em 'Assistir' para ver sem baixar ou em 'Baixar' para salvar o vídeo. "
-            "Deixe o computador, o Freddy Security "
-            "e a janela do ngrok ligados."
         )
 
     def linha(self, pai, nome, valor):
@@ -937,16 +961,16 @@ class FreddySecurity:
         if self.camera is not None:
             self.camera.release()
             self.camera = None
-        self.camera = cv2.VideoCapture(CAMERA_ID, cv2.CAP_DSHOW)
+        self.camera = cv2.VideoCapture(CAMERA_ID)
         if self.camera.isOpened():
             self.status_camera.config(text='Conectada', fg=VERDE)
-            self.rodape.config(text='WEBCAM CONECTADA | SISTEMA ATIVO')
+            self.rodape.config(text='CAMERA CONECTADA | SISTEMA ATIVO')
         else:
             self.camera.release()
             self.camera = None
             self.status_camera.config(text='Sem sinal', fg=VERMELHO)
             self.tela.config(image='', text='\n\nSEM SINAL\n\nAGUARDANDO WEBCAM...\n\nCÂMERA 01 | OFFLINE')
-            self.rodape.config(text='MODO DE TESTE | CONECTE A WEBCAM')
+            self.rodape.config(text='CONECTE A CÂMERA | SISTEMA ATIVO')
 
     def atualizar_imagem(self):
         self.ler_arduino()
@@ -1001,7 +1025,7 @@ class FreddySecurity:
         if self.frame is None:
             messagebox.showinfo('Freddy Security', 'Aguardando a webcam para capturar uma foto.')
             return
-        nome = os.path.join(PASTA_PROJETO, datetime.now().strftime('freddy_%Y%m%d_%H%M%S.jpg'))
+        nome = os.path.join(PASTA_MIDIA, datetime.now().strftime('freddy_%Y%m%d_%H%M%S.jpg'))
         if cv2.imwrite(nome, self.frame):
             self.rodape.config(text=f'FOTO SALVA: {nome}')
         else:
@@ -1015,7 +1039,7 @@ class FreddySecurity:
                 messagebox.showinfo('Freddy Security', 'Conecte a webcam antes de iniciar a gravação.')
             return
         altura, largura = self.frame.shape[:2]
-        self.nome_video = os.path.join(PASTA_PROJETO, datetime.now().strftime('freddy_%Y%m%d_%H%M%S.avi'))
+        self.nome_video = os.path.join(PASTA_MIDIA, datetime.now().strftime('freddy_%Y%m%d_%H%M%S.avi'))
         codec = cv2.VideoWriter_fourcc(*'MJPG')
         self.video = cv2.VideoWriter(self.nome_video, codec, 20.0, (largura, altura))
         if not self.video.isOpened():
@@ -1085,8 +1109,8 @@ class FreddySecurity:
         horario = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
         try:
             with open(ARQUIVO_MOVIMENTOS, "a", encoding="utf-8") as arquivo:
-                arquivo.write(f"{horario} - Presen\u00e7a detectada ({' + '.join(origens)})\n")
-            self.rodape.config(text=f"PRESEN\u00c7A DETECTADA | {horario}")
+                arquivo.write(f"{horario} - Movimento detectado ({' + '.join(origens)})\n")
+            self.rodape.config(text=f"MOVIMENTO DETECTADO | {horario}")
         except OSError as erro:
             print(f"N\u00e3o foi poss\u00edvel registrar o movimento: {erro}")
 
@@ -1095,8 +1119,8 @@ class FreddySecurity:
         extensoes = (".jpg", ".jpeg", ".png", ".avi", ".mp4", ".mov")
         arquivos = []
         try:
-            for nome in os.listdir(PASTA_PROJETO):
-                caminho = os.path.join(PASTA_PROJETO, nome)
+            for nome in os.listdir(PASTA_MIDIA):
+                caminho = os.path.join(PASTA_MIDIA, nome)
                 if nome.lower().startswith("freddy_") and nome.lower().endswith(extensoes) and os.path.isfile(caminho):
                     arquivos.append(caminho)
         except OSError as erro:
@@ -1120,7 +1144,7 @@ class FreddySecurity:
 
     def abrir_pasta_gravacoes(self):
         try:
-            os.startfile(PASTA_PROJETO)
+            os.startfile(PASTA_MIDIA)
         except (OSError, AttributeError) as erro:
             messagebox.showerror("Grava\u00e7\u00f5es", f"N\u00e3o foi poss\u00edvel abrir a pasta: {erro}", parent=self.janela_gravacoes)
 
@@ -1273,7 +1297,6 @@ class FreddySecurity:
                 pass
         self.janela.destroy()
 if __name__ == '__main__':
-    conectar_banco()
     janela = tk.Tk()
 
     def abrir_monitoramento(usuario):
