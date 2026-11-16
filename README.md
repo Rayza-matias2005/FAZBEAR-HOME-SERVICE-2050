@@ -39,22 +39,33 @@ pip install -r requirements.txt
 
 ### 3. Configurar o banco de dados
 
-1. Instale o MySQL Server e crie a conexão com seu usuário e senha.
+1. Instale o MySQL Server e defina a senha do usuário administrador (`root`) durante a instalação.
 2. Importe o arquivo `freddy_security.sql` (ele cria o banco e a tabela de usuários):
    ```
    mysql -u root -p < freddy_security.sql
    ```
-3. Abra o arquivo `Freddy_Security_Login/mysql_config.json` e coloque os dados do seu MySQL (o arquivo `mysql_config.example.json`, na mesma pasta, mostra o formato esperado):
+3. Crie um usuário só para o projeto, com acesso apenas ao banco `freddy_security`. Entre no MySQL como administrador:
+   ```
+   mysql -u root -p
+   ```
+   e execute (troque `SUA_SENHA_AQUI` por uma senha de sua escolha):
+   ```sql
+   CREATE USER 'freddy_app'@'localhost' IDENTIFIED BY 'SUA_SENHA_AQUI';
+   GRANT SELECT, INSERT, UPDATE, DELETE ON freddy_security.* TO 'freddy_app'@'localhost';
+   FLUSH PRIVILEGES;
+   ```
+   Se preferir, pode usar o próprio `root` no passo seguinte, mas um usuário dedicado é mais seguro, porque só enxerga o banco do projeto.
+4. Abra o arquivo `Freddy_Security_Login/mysql_config.json` e coloque os dados do seu MySQL (o arquivo `mysql_config.example.json`, na mesma pasta, mostra o formato esperado):
    ```json
    {
      "host": "localhost",
      "port": 3306,
-     "user": "root",
+     "user": "freddy_app",
      "password": "SUA_SENHA_AQUI",
      "database": "freddy_security"
    }
    ```
-   O programa usa esses dados para conectar ao banco, então a senha precisa ser a mesma do seu MySQL. Se o arquivo não existir, copie o `mysql_config.example.json` e renomeie a cópia para `mysql_config.json`.
+   O programa usa esses dados para conectar ao banco, então a senha precisa ser a que você definiu para o `freddy_app` no passo anterior. Se o arquivo não existir, copie o `mysql_config.example.json` e renomeie a cópia para `mysql_config.json`.
 
 ### 4. Montar e programar o Arduino
 
